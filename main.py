@@ -52,16 +52,17 @@ TOOST_WORK = os.path.join(_PLUGIN_DIR, "toost")
 TOOST_RENDER = os.path.join(TOOST_WORK, "render")
 
 TOOST_DOWNLOAD_URLS = [
-    "https://www.now61.cn/f/kVz6Ty/toost_windows.zip",  # direct link
     "https://github.com/TheGreatRambler/toost/"
     "releases/latest/download/toost_windows.zip",
+    "https://www.now61.com/f/kVz6Ty/toost_windows.zip",  # backup
 ]
 TOOST_ZIP_PATH = os.path.join(_PLUGIN_DIR, "_tmp", "toost_windows.zip")
 TOOST_DOWNLOADED = False
+TOOST_SHA256 = "953B1018CE3F23020D3D5292C636898EF4D735622C6B927497C4ED5C0DC9C075"
 
 
 async def _ensure_toost():
-    """If toost does not exist, try downloading from direct link then GitHub"""
+    """If toost does not exist, try downloading from GitHub then backup"""
     global TOOST_DOWNLOADED
     if TOOST_DOWNLOADED:
         return True
@@ -74,7 +75,7 @@ async def _ensure_toost():
     for url in TOOST_DOWNLOAD_URLS:
         if not url:
             continue
-        source = "direct link" if "github.com" not in url else "GitHub"
+        source = "GitHub" if "github.com" in url else "backup"
         logger.info(f"[SMM2] toost not found, downloading from {source}...")
         ok = await _download_toost(url)
         if ok:
@@ -88,14 +89,14 @@ async def _ensure_toost():
 
 
 async def _download_toost(url):
-    """Download toost from the given URL and extract, returns success status"""
+    """Download toost from the given URL, verify SHA256, and extract"""
     try:
         # Clean up any leftover partial zip
         if os.path.exists(TOOST_ZIP_PATH):
             os.unlink(TOOST_ZIP_PATH)
 
         async with aiohttp.ClientSession() as s:
-            async with s.get(url, timeout=180, ssl=False) as r:
+            async with s.get(url, timeout=180) as r:
                 if r.status != 200:
                     logger.error(f"[SMM2] Failed to download toost HTTP {r.status}")
                     return False
@@ -116,6 +117,25 @@ async def _download_toost(url):
                                 f"[SMM2] toost download [{bar}] {pct:.0%} "
                                 f"({kb:.0f}/{kb_total:.0f} KB)"
                             )
+
+        # SHA256 verification
+        import hashlib
+        sha = hashlib.sha256()
+        with open(TOOST_ZIP_PATH, "rb") as f:
+            while True:
+                chunk = f.read(8192)
+                if not chunk:
+                    break
+                sha.update(chunk)
+        file_hash = sha.hexdigest().upper()
+        if file_hash != TOOST_SHA256:
+            logger.error(f"[SMM2] SHA256 mismatch! Expected {TOOST_SHA256}, got {file_hash}")
+            try:
+                os.unlink(TOOST_ZIP_PATH)
+            except Exception:
+                pass
+            return False
+        logger.info(f"[SMM2] SHA256 verified: {file_hash}")
 
         with zipfile.ZipFile(TOOST_ZIP_PATH, "r") as z:
             z.extractall(os.path.join(_PLUGIN_DIR, "toost"))
