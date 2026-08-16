@@ -251,7 +251,7 @@ def _send_text(event, text):
     "astrbot_plugin_smm2_en",
     "linker9527",
     "Super Mario Maker 2 level/player query, random draw, bcd download, level rendering",
-    "1.1.1",
+    "1.1.2",
     "https://github.com/linker9527/astrbot_plugin_smm2_en",
 )
 class Smm2Plugin(Star):
