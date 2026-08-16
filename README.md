@@ -31,7 +31,7 @@ ID format: 9 chars or `XXX-XXX-XXX`, case-insensitive. Queries levels first, fal
 
 Renders HD full images of the level overworld and underworld using [toost](https://github.com/TheGreatRambler/toost) v2.0.2 (2x scale, grid removed). Two PNG images are sent directly to the chat, along with the bcd file.
 
-**Auto-install on first use:** The first time `/render` is executed, the plugin will automatically download the toost renderer and extract it to the plugin directory. Download takes some time (~17MB), check the AstrBot logs for progress. If the direct link fails, it will fall back to GitHub.
+**Auto-install on first use:** The first time `/render` is executed, the plugin will automatically download the toost renderer from a direct link and extract it to the plugin directory, no manual setup needed. Download takes some time (~17MB), check the AstrBot logs for progress. If the direct link fails, it will fall back to GitHub.
 
 **Manual install (backup):** If auto-download fails, go to [toost Releases](https://github.com/TheGreatRambler/toost/releases) and download `toost_windows.zip`, extract it, and place the `toost` folder in the plugin directory (same level as `main.py`).
 
