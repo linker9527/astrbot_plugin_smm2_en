@@ -1,1 +1,0 @@
-"""AstrBot Plugin: SMM2"""

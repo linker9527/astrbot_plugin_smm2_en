@@ -4,8 +4,8 @@ author: linker9527
 author_url: https://github.com/linker9527
 description: Super Mario Maker 2 level/player query, random draw, bcd download, HD level rendering.
 short_desc: SMM2 level query, random draw, bcd download, level rendering
-version: 1.1.1
-repo: https://github.com/linker9527/astrbot_plugin_smm2_en
+version: 1.2.0
+repo: https://github.com/linker9527/astrbot_plugin_smm2
 category: Games
 tags:
   - Game
@@ -15,12 +15,16 @@ help: |
   SMM2 Level/Player Query - Super Mario Maker 2 Data Tool
 
   Commands:
-  /smm2 <ID> - Query level info (with thumbnail) or player info
-  /rest <0-4> - Random level draw + bcd download (0=any/1=easy/2=normal/3=hard/4=extreme)
-  /bcd <ID> - Download bcd file for a specific level
-  /render <ID> - Render HD level images (overworld + underworld)
+  /smm2 <level or player ID> - Query level info (with thumbnail) or player info
+  /rest 0-4 - Random level draw + bcd download (0=any/1=easy/2=normal/3=hard/4=extreme)
+  /bcd <level ID> - Download bcd file for a specific level
+  /render <level ID> - Render HD level images (overworld + underworld)
 
   Notes:
   ID supports dashed (XXX-XXX-XXX) or 9-char format, case-insensitive
   /smm2 queries levels first, auto-falls back to player if not found
-  /render requires toost renderer; it auto-downloads on first use (GitHub official + SHA256 verified)
+  Supports LLM natural language: just say "look up xxx" to query
+  Supports image recognition: send a Switch screenshot to auto-recognize level ID and render
+  OCR correction: SMM2 IDs do not contain I/O/Z, auto-corrected (O→0, I→L/1/7)
+  /render requires toost renderer; place the toost directory in the plugin folder
+  toost download: https://github.com/TheGreatRambler/toost/releases
