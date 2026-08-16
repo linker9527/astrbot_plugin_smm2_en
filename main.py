@@ -1,23 +1,22 @@
 # -*- coding: utf-8 -*-
 """
 AstrBot Plugin: SMM2 (Super Mario Maker 2)
-Level query / Player query / Random draw / bcd download / Level rendering / LLM Tool + OCR image recognition
-v1.2.0
+Level query / Player query / Random draw / bcd download / Level rendering
 """
 import asyncio
 import gzip
 import os
 import re
 import subprocess
+import zipfile
 from typing import Optional
 
 import aiohttp
 
 from astrbot.api.star import Star, Context, register
 from astrbot.api.event import filter, AstrMessageEvent
-from astrbot.api.event.filter import EventMessageType
 from astrbot.api.message_components import Plain, Image, File
-from astrbot.api.all import MessageChain, llm_tool
+from astrbot.api.all import MessageChain
 from astrbot.api import logger
 
 
@@ -52,46 +51,89 @@ TOOST_EXE = os.path.join(_PLUGIN_DIR, "toost", "bin", "toost.exe")
 TOOST_WORK = os.path.join(_PLUGIN_DIR, "toost")
 TOOST_RENDER = os.path.join(TOOST_WORK, "render")
 
-# SMM2 ID charset: 0-9 + A-Y, excluding I, O, Z
-# OCR correction candidates: O→0, I→1 or L, Z→2
-_OCR_FIX_VARIANTS = [
-    {"O": "0", "I": "L", "Z": "2", "o": "0", "i": "L", "z": "2"},
-    {"O": "0", "I": "1", "Z": "2", "o": "0", "i": "1", "z": "2"},
-    {"O": "0", "I": "7", "Z": "2", "o": "0", "i": "7", "z": "2"},
+TOOST_DOWNLOAD_URLS = [
+    "https://www.now61.cn/f/kVz6Ty/toost_windows.zip",  # direct link
+    "https://github.com/TheGreatRambler/toost/"
+    "releases/latest/download/toost_windows.zip",
 ]
+TOOST_ZIP_PATH = os.path.join(_PLUGIN_DIR, "_tmp", "toost_windows.zip")
+TOOST_DOWNLOADED = False
 
 
-def fix_smm2_id(pure_id: str, variant: int = 0) -> str:
-    """Correct OCR-recognized IDs by replacing I/O/Z with valid characters. variant selects correction scheme"""
-    if variant >= len(_OCR_FIX_VARIANTS):
-        variant = 0
-    fix = _OCR_FIX_VARIANTS[variant]
-    return "".join(fix.get(c, c) for c in pure_id)
+async def _ensure_toost():
+    """If toost does not exist, try downloading from direct link then GitHub"""
+    global TOOST_DOWNLOADED
+    if TOOST_DOWNLOADED:
+        return True
+    if os.path.exists(TOOST_EXE):
+        TOOST_DOWNLOADED = True
+        return True
+
+    os.makedirs(os.path.join(_PLUGIN_DIR, "_tmp"), exist_ok=True)
+
+    for url in TOOST_DOWNLOAD_URLS:
+        if not url:
+            continue
+        source = "direct link" if "github.com" not in url else "GitHub"
+        logger.info(f"[SMM2] toost not found, downloading from {source}...")
+        ok = await _download_toost(url)
+        if ok:
+            TOOST_DOWNLOADED = True
+            logger.info(f"[SMM2] toost downloaded from {source}")
+            return True
+        logger.warning(f"[SMM2] Download from {source} failed, trying next source...")
+
+    logger.error("[SMM2] All download sources failed")
+    return False
 
 
-def generate_correction_candidates(pure_id: str):
-    """Generate up to 3 correction candidate IDs"""
-    seen = set()
-    result = []
-    for i in range(len(_OCR_FIX_VARIANTS)):
-        candidate = fix_smm2_id(pure_id, i)
-        if candidate not in seen:
-            seen.add(candidate)
-            result.append(candidate)
-        if len(result) >= 3:
-            break
-    return result
+async def _download_toost(url):
+    """Download toost from the given URL and extract, returns success status"""
+    try:
+        # Clean up any leftover partial zip
+        if os.path.exists(TOOST_ZIP_PATH):
+            os.unlink(TOOST_ZIP_PATH)
+
+        async with aiohttp.ClientSession() as s:
+            async with s.get(url, timeout=180, ssl=False) as r:
+                if r.status != 200:
+                    logger.error(f"[SMM2] Failed to download toost HTTP {r.status}")
+                    return False
+                total = int(r.headers.get("Content-Length", "0"))
+                downloaded = 0
+                bar_len = 30
+                with open(TOOST_ZIP_PATH, "wb") as f:
+                    async for chunk in r.content.iter_chunked(8192):
+                        downloaded += len(chunk)
+                        f.write(chunk)
+                        if total > 0:
+                            pct = downloaded / total
+                            filled = int(bar_len * pct)
+                            bar = "#" * filled + "." * (bar_len - filled)
+                            kb = downloaded / 1024
+                            kb_total = total / 1024
+                            logger.info(
+                                f"[SMM2] toost download [{bar}] {pct:.0%} "
+                                f"({kb:.0f}/{kb_total:.0f} KB)"
+                            )
+
+        with zipfile.ZipFile(TOOST_ZIP_PATH, "r") as z:
+            z.extractall(os.path.join(_PLUGIN_DIR, "toost"))
+        try:
+            os.unlink(TOOST_ZIP_PATH)
+        except Exception:
+            pass
+
+        if os.path.exists(TOOST_EXE):
+            return True
+        logger.error("[SMM2] toost exe not found after extraction")
+        return False
+    except Exception as e:
+        logger.error(f"[SMM2] Failed to download toost: {e}")
+        return False
 
 
-async def try_query_level_with_corrections(session, pure_id):
-    """Try querying level with up to 3 correction schemes, returns (level, used_id) or (None, None)"""
-    candidates = generate_correction_candidates(pure_id)
-    for candidate in candidates:
-        level = await fetch_level(session, candidate)
-        if level:
-            return level, candidate
-    return None, candidates[0] if candidates else None
-
+# ============ Utility Functions ============
 
 def parse_id(raw: str) -> Optional[str]:
     raw = raw.strip()
@@ -188,137 +230,19 @@ def _send_text(event, text):
 @register(
     "astrbot_plugin_smm2",
     "linker9527",
-    "Super Mario Maker 2 level/player query, random draw, bcd download, level rendering, LLM Tool + OCR image recognition",
-    "1.2.0",
+    "Super Mario Maker 2 level/player query, random draw, bcd download, level rendering",
+    "1.1.1",
     "https://github.com/linker9527/astrbot_plugin_smm2",
 )
 class Smm2Plugin(Star):
     def __init__(self, context: Context, config=None):
         super().__init__(context)
         self.config = config or {}
-        self._llm_hint = ""
-        if self.config:
-            self._llm_hint = self.config.get("llm_hint") or ""
         self._tmp_dir = os.path.join(_PLUGIN_DIR, "_tmp")
         os.makedirs(self._tmp_dir, exist_ok=True)
         os.makedirs(TOOST_RENDER, exist_ok=True)
 
-    # ==================== Image Interceptor ====================
-
-    @filter.regex(r".*", priority=5)
-    async def on_image_message(self, event: AstrMessageEvent, match_obj=None):
-        """Intercept messages containing images, extract level ID via OCR, render and return directly"""
-        # OCR switch check
-        if not (self.config and self.config.get("enable_ocr", False)):
-            return  # OCR disabled, don't intercept images
-
-        message_obj = event.message_obj
-        img_comp = None
-        if message_obj and hasattr(message_obj, "message") and message_obj.message:
-            for comp in message_obj.message:
-                if isinstance(comp, Image):
-                    img_comp = comp
-                    break
-        if not img_comp:
-            return  # No image, don't intercept
-
-        # Try extracting ID from text first, use OCR for image-only messages
-        msg_str = event.get_message_str() or ""
-        pure_id = parse_id(msg_str) or ""
-
-        if not pure_id:
-            pure_id = await self._ocr_extract_id(img_comp) or ""
-            if not pure_id:
-                return  # OCR failed, let LLM handle it
-
-        pure_id = pure_id.upper()
-        logger.info(f"[SMM2] Image intercepted ID: {pure_id}")
-
-        quality = "high"
-        if self.config:
-            quality = (self.config.get("image_quality") or "high").strip().lower()
-
-        async with aiohttp.ClientSession() as s:
-            level, used_id = await try_query_level_with_corrections(s, pure_id)
-            if not level:
-                return
-
-            pure_id = used_id
-            body = self._fmt_level(pure_id, level)
-
-            if quality == "high" and os.path.exists(TOOST_EXE):
-                images = await self._do_render(event, pure_id)
-                if images:
-                    await event.send(MessageChain([Plain(body)]))
-                    for img_path in images:
-                        try:
-                            await event.send(MessageChain([Image(file=img_path)]))
-                        except Exception as e:
-                            logger.error(f"[SMM2] Failed to send image: {e}")
-                    for fp in images:
-                        try: os.unlink(fp)
-                        except: pass
-                    event.stop_event()
-                    return
-            img_url = f"{THUMB_URL}/{pure_id}"
-            await event.send(MessageChain([Plain(body), Image(file=img_url, url=img_url)]))
-            event.stop_event()
-
-    async def _ocr_extract_id(self, img_comp) -> str:
-        """Download image then use a vision-capable provider for OCR to extract level ID"""
-        # Get image URL
-        img_url = getattr(img_comp, "url", "") or getattr(img_comp, "file", "")
-        if not img_url:
-            return ""
-
-        # Download image and convert to base64 data URL
-        try:
-            if img_url.startswith("http"):
-                async with aiohttp.ClientSession() as s:
-                    async with s.get(img_url, timeout=30) as r:
-                        raw = await r.read()
-            elif os.path.exists(img_url):
-                with open(img_url, "rb") as f:
-                    raw = f.read()
-            else:
-                logger.error(f"[SMM2] Image URL inaccessible: {img_url[:100]}")
-                return ""
-        except Exception as e:
-            logger.error(f"[SMM2] Failed to download image: {e}")
-            return ""
-
-        import base64 as _b64
-        b64 = _b64.b64encode(raw).decode()
-        data_url = f"data:image/jpeg;base64,{b64}"
-
-        # Find a vision-capable provider
-        vision_provider = None
-        for prov in self.context.get_all_providers():
-            modalities = prov.provider_config.get("modalities", [])
-            if modalities == [] or "image" in modalities:
-                vision_provider = prov
-                break
-        if not vision_provider:
-            logger.warning("[SMM2] No vision-capable provider found, OCR skipped")
-            return ""
-
-        # Call provider for OCR
-        try:
-            resp = await vision_provider.text_chat(
-                prompt="This is a game screenshot. Please extract the level ID from the image. The format is XXX-XXX-XXX (three segments of uppercase letters and digits). Note: O should be treated as 0, I as 1, Z as 2. Only reply with the level ID, no other text. If no such ID is found in the image, reply 'not found'.",
-                image_urls=[data_url],
-                system_prompt="You are a game image recognition assistant that only extracts level IDs.",
-                request_max_retries=1,
-            )
-            text = resp.completion_text or ""
-            pure_id = parse_id(text) or ""
-            logger.info(f"[SMM2] OCR result: {text.strip()[:100]}, extracted ID: {pure_id}")
-            return pure_id
-        except Exception as e:
-            logger.error(f"[SMM2] OCR call failed: {e}")
-            return ""
-
-    # ==================== /smm2 Command ====================
+    # ---------- /smm2 ----------
 
     @filter.command("smm2", priority=1)
     async def cmd_smm2(self, event: AstrMessageEvent, id: str = ""):
@@ -330,40 +254,17 @@ class Smm2Plugin(Star):
             return
         pure_id = pure_id.upper()
 
-        quality = "low"
-        if self.config:
-            quality = (self.config.get("smm2_quality") or "low").strip().lower()
-
         async with aiohttp.ClientSession() as s:
             level = await fetch_level(s, pure_id)
             if level:
                 body = self._fmt_level(pure_id, level)
-                if quality == "high":
-                    if os.path.exists(TOOST_EXE):
-                        images = await self._do_render(event, pure_id)
-                        if images:
-                            await event.send(MessageChain([Plain(body)]))
-                            for img_path in images:
-                                try:
-                                    await event.send(MessageChain([Image(file=img_path)]))
-                                except Exception as e:
-                                    logger.error(f"[SMM2] Failed to send image: {e}")
-                            for fp in images:
-                                try: os.unlink(fp)
-                                except: pass
-                            return
-                    # fallback to low
-                    img_url = f"{THUMB_URL}/{pure_id}"
+                body += f"\n\nRender HD images: /render {pure_id[0:3]}-{pure_id[3:6]}-{pure_id[6:9]}"
+                img_url = f"{THUMB_URL}/{pure_id}"
+                try:
                     await event.send(MessageChain([Plain(body), Image(file=img_url, url=img_url)]))
-                    return
-                else:
-                    body += f"\n\nRender HD images: /render {pure_id[0:3]}-{pure_id[3:6]}-{pure_id[6:9]}"
-                    img_url = f"{THUMB_URL}/{pure_id}"
-                    try:
-                        await event.send(MessageChain([Plain(body), Image(file=img_url, url=img_url)]))
-                    except Exception as e:
-                        await _send_text(event, body)
-                    return
+                except Exception as e:
+                    await _send_text(event, body)
+                return
 
             user_data, lists = await fetch_player(s, pure_id)
             if user_data and isinstance(user_data, dict) and "_status" not in user_data:
@@ -435,7 +336,7 @@ class Smm2Plugin(Star):
         lines.append(fmt_courses(lists["wr"]))
         return "\n".join(lines)
 
-    # ==================== /rest Command ====================
+    # ---------- /rest ----------
 
     @filter.command("rest", priority=1)
     async def cmd_rest(self, event: AstrMessageEvent, mode: str = ""):
@@ -493,7 +394,7 @@ class Smm2Plugin(Star):
             return (cid, data.get("name"))
         return ("", "")
 
-    # ==================== /bcd Command ====================
+    # ---------- /bcd ----------
 
     @filter.command("bcd", priority=1)
     async def cmd_bcd(self, event: AstrMessageEvent, id: str = ""):
@@ -516,7 +417,7 @@ class Smm2Plugin(Star):
                 return
             await self._send_bcd_file(event, pure_id, cname, fpath)
 
-    # ==================== /render Command (image only) ====================
+    # ---------- /render ----------
 
     @filter.command("render", priority=1)
     async def cmd_render(self, event: AstrMessageEvent, id: str = ""):
@@ -529,36 +430,18 @@ class Smm2Plugin(Star):
         pure_id = pure_id.upper()
 
         if not os.path.exists(TOOST_EXE):
-            await _send_text(event, "Renderer not found, please place the toost directory in the plugin folder")
-            return
+            downloaded = await _ensure_toost()
+            if not downloaded:
+                await _send_text(event, "Renderer toost auto-download failed, please try again later")
+                return
 
         await _send_text(event, f"⏳ Rendering images for level {pure_id}...")
 
-        images = await self._do_render(event, pure_id)
-        if not images:
-            return
-
-        # Send images
-        for img_path in images:
-            try:
-                await event.send(MessageChain([Image(file=img_path)]))
-            except Exception as e:
-                logger.error(f"[SMM2] Failed to send image: {e}")
-
-        # Cleanup
-        for fp in images:
-            try:
-                os.unlink(fp)
-            except:
-                pass
-
-    async def _do_render(self, event, pure_id):
-        """Execute rendering, returns list of image paths"""
         async with aiohttp.ClientSession() as s:
             raw = await api_get(s, f"{LEVEL_DATA}/{pure_id}", as_json=False)
             if not raw or isinstance(raw, dict):
                 await _send_text(event, f"bcd download failed for level {pure_id}")
-                return None
+                return
 
             if raw[:2] == b"\x1f\x8b":
                 try:
@@ -581,30 +464,57 @@ class Smm2Plugin(Star):
                     await _send_text(event, f"Render failed: {result.stderr or result.stdout}")
                     try: os.unlink(bcd_path)
                     except: pass
-                    return None
+                    return
             except subprocess.TimeoutExpired:
                 await _send_text(event, "Render timed out")
                 try: os.unlink(bcd_path)
                 except: pass
-                return None
+                return
 
-            # Cleanup bcd
-            try: os.unlink(bcd_path)
-            except: pass
+            level = await fetch_level(s, pure_id)
+            label = level.get("name") if level else ""
 
-            images = []
+            # Send images
+            chains = []
             if os.path.exists(ow_path) and os.path.getsize(ow_path) > 100:
-                images.append(ow_path)
+                chains.append(MessageChain([Image(file=ow_path)]))
             if os.path.exists(sw_path) and os.path.getsize(sw_path) > 100:
-                images.append(sw_path)
+                chains.append(MessageChain([Image(file=sw_path)]))
 
-            if not images:
-                await _send_text(event, f"Render complete but no images generated")
-                return None
+            sent_ow = False
+            sent_sw = False
+            for i, chain in enumerate(chains):
+                try:
+                    await event.send(chain)
+                    if i == 0:
+                        sent_ow = True
+                    else:
+                        sent_sw = True
+                except Exception as e:
+                    logger.error(f"[SMM2] Failed to send image: {e}")
 
-            return images
+            msg = f"{pure_id} ({label})" if label else f"{pure_id}"
+            msg += " ✅ Overworld" if sent_ow else " ❌ Overworld"
+            msg += " + Underworld done" if sent_sw else " + Underworld"
+            await _send_text(event, msg)
 
-    # ==================== File Sending ====================
+            # Send bcd
+            sent_bcd = False
+            try:
+                await event.send(MessageChain([
+                    Plain(f"Level {pure_id} bcd file"),
+                    File(name=f"{pure_id}.bcd", file=bcd_path),
+                ]))
+                sent_bcd = True
+            except Exception as e:
+                logger.error(f"[SMM2] bcd send failed: {e}")
+
+            # Cleanup all
+            for fp in [bcd_path, ow_path, sw_path]:
+                try: os.unlink(fp)
+                except: pass
+
+    # ---------- File Sending ----------
 
     async def _send_bcd_file(self, event, pure_id, cname, fpath):
         label = cname or pure_id
@@ -623,297 +533,3 @@ class Smm2Plugin(Star):
                 os.remove(fpath)
             except OSError as e:
                 logger.error(f"[SMM2] Failed to delete temp file: {e}")
-
-        # ==================== LLM Tools ====================
-
-    @llm_tool(name="smm2_image_lookup")
-    async def smm2_image_lookup(self, event: AstrMessageEvent, course_id: str):
-        """When a user sends an image (e.g., Super Mario Maker 2 game screenshot, Switch screen photo, etc.), you must use this tool. This tool will recognize the level ID from the image and return the level image and basic info. Note: when a user sends an image, you must use this tool, do not use other smm2 query tools.
-
-        Important rules:
-        1. SMM2 IDs consist of 9 characters (format: XXX-XXX-XXX), using only: 0-9, A-Y, excluding I, O, Z.
-        2. If the ID recognized from the image contains O, I, Z, correct them: O→0, I→1, Z→2.
-        3. For example, if you see "MJ-D65-O2G" in the image, O should be changed to 0, becoming "MJ-D65-02G".
-        4. If there are multiple IDs in the image, prioritize the level ID (usually shown on the level detail page).
-        5. If there is no ID in XXX-XXX-XXX format in the image, do not call this tool.
-
-        User hint: {llm_hint}
-
-        Args:
-            course_id(string): Level ID recognized from the image, format XXX-XXX-XXX or 9 chars, needs I/O/Z correction
-        """
-        if not (self.config and self.config.get("enable_llm_tools", False)):
-            yield event.plain_result("LLM tools are disabled")
-            return
-        raw_id = parse_id(course_id) or ""
-        if not raw_id:
-            yield event.plain_result("Could not recognize a valid level ID from the image")
-            return
-
-        async with aiohttp.ClientSession() as s:
-            level, used_id = await try_query_level_with_corrections(s, raw_id)
-            if not level:
-                yield event.plain_result(f"Level {raw_id} does not exist")
-                return
-
-        pure_id = used_id
-        quality = "high"
-        if self.config:
-            quality = (self.config.get("image_quality") or "high").strip().lower()
-
-        body = self._fmt_level(pure_id, level)
-
-        if quality == "high":
-            if os.path.exists(TOOST_EXE):
-                images = await self._do_render(event, pure_id)
-                if images:
-                    await event.send(MessageChain([Plain(body)]))
-                    for img_path in images:
-                        try:
-                            await event.send(MessageChain([Image(file=img_path)]))
-                        except Exception as e:
-                            logger.error(f"[SMM2] Failed to send image: {e}")
-                    for fp in images:
-                        try: os.unlink(fp)
-                        except: pass
-                    yield event.plain_result("Level info and images sent")
-                    return
-            # fallback to low
-            img_url = f"{THUMB_URL}/{pure_id}"
-            await event.send(MessageChain([Plain(body), Image(file=img_url, url=img_url)]))
-            yield event.plain_result("Level info and images sent")
-            return
-        else:
-            img_url = f"{THUMB_URL}/{pure_id}"
-            await event.send(MessageChain([Plain(body), Image(file=img_url, url=img_url)]))
-            yield event.plain_result("Level info and images sent")
-            return
-    @llm_tool(name="smm2_query_auto")
-    async def smm2_query_auto(self, event: AstrMessageEvent, course_id: str):
-        """Query Super Mario Maker 2 level or player info. Use this tool when a user says "look up xxx-xxx-xxx" via text without specifying whether it's a level or player. Note: this tool is for text messages only. If the user sends an image, use the smm2_image_lookup tool instead.
-
-        Important: SMM2 IDs consist of 9 characters (format: XXX-XXX-XXX), using only: 0-9, A-Y, excluding I, O, Z.
-        If the recognized ID contains O, I, Z, correct them: O→0, I→1, Z→2.
-
-        User hint: {llm_hint}
-
-        Args:
-            course_id(string): Level or player ID, format XXX-XXX-XXX or 9 chars
-        """
-        if not (self.config and self.config.get("enable_llm_tools", False)):
-            yield event.plain_result("LLM tools are disabled")
-            return
-
-        raw_id = parse_id(course_id) or ""
-        if not raw_id:
-            yield event.plain_result("Could not recognize ID format, please provide an ID in XXX-XXX-XXX format")
-            return
-
-        async with aiohttp.ClientSession() as s:
-            level, used_id = await try_query_level_with_corrections(s, raw_id)
-            if level:
-                pure_id = used_id
-                body = self._fmt_level(pure_id, level)
-                quality = "low"
-                if self.config:
-                    quality = (self.config.get("smm2_quality") or "low").strip().lower()
-                if quality == "high":
-                    if os.path.exists(TOOST_EXE):
-                        images = await self._do_render(event, pure_id)
-                        if images:
-                            await event.send(MessageChain([Plain(self._fmt_level(pure_id, level))]))
-                            for img_path in images:
-                                try:
-                                    await event.send(MessageChain([Image(file=img_path)]))
-                                except Exception as e:
-                                    logger.error(f"[SMM2] Failed to send image: {e}")
-                            for fp in images:
-                                try: os.unlink(fp)
-                                except: pass
-                            yield event.plain_result("Level info and images sent")
-                            return
-                    # fallback to low
-                    body = self._fmt_level(pure_id, level)
-                    body += f"\n\nRender HD images: /render {pure_id[0:3]}-{pure_id[3:6]}-{pure_id[6:9]}"
-                    img_url = f"{THUMB_URL}/{pure_id}"
-                    await event.send(MessageChain([Plain(body), Image(file=img_url, url=img_url)]))
-                    yield event.plain_result("Level info and images sent")
-                    return
-                else:
-                    body = self._fmt_level(pure_id, level)
-                    body += f"\n\nRender HD images: /render {pure_id[0:3]}-{pure_id[3:6]}-{pure_id[6:9]}"
-                    img_url = f"{THUMB_URL}/{pure_id}"
-                    await event.send(MessageChain([Plain(body), Image(file=img_url, url=img_url)]))
-                    yield event.plain_result("Level info and images sent")
-                    return
-
-            pure_id = fix_smm2_id(raw_id)
-            user_data, lists = await fetch_player(s, pure_id)
-            if user_data and isinstance(user_data, dict) and "_status" not in user_data:
-                body = self._fmt_player(pure_id, user_data, lists)
-                yield event.chain_result([Plain(body)])
-                return
-
-        yield event.plain_result(f"ID {raw_id} does not exist (level/player not found)")
-
-    @llm_tool(name="smm2_query_course")
-    async def smm2_query_course(self, event: AstrMessageEvent, course_id: str):
-        """Query Super Mario Maker 2 level info. Use this tool when a user explicitly says "look up xxx this level" or "this level" via text, querying levels only. Returns an error if the level does not exist. Note: this tool is for text messages only. If the user sends an image, use the smm2_image_lookup tool instead.
-
-        Important: SMM2 IDs consist of 9 characters (format: XXX-XXX-XXX), using only: 0-9, A-Y, excluding I, O, Z.
-        If the recognized ID contains O, I, Z, correct them: O→0, I→1, Z→2.
-
-        User hint: {llm_hint}
-
-        Args:
-            course_id(string): Level ID, format XXX-XXX-XXX or 9 chars
-        """
-        if not (self.config and self.config.get("enable_llm_tools", False)):
-            yield event.plain_result("LLM tools are disabled")
-            return
-
-        raw_id = parse_id(course_id) or ""
-        if not raw_id:
-            yield event.plain_result("Could not recognize ID format, please provide an ID in XXX-XXX-XXX format")
-            return
-
-        async with aiohttp.ClientSession() as s:
-            level, used_id = await try_query_level_with_corrections(s, raw_id)
-            if level:
-                pure_id = used_id
-                body = self._fmt_level(pure_id, level)
-                quality = "low"
-                if self.config:
-                    quality = (self.config.get("smm2_quality") or "low").strip().lower()
-                if quality == "high":
-                    if os.path.exists(TOOST_EXE):
-                        images = await self._do_render(event, pure_id)
-                        if images:
-                            await event.send(MessageChain([Plain(self._fmt_level(pure_id, level))]))
-                            for img_path in images:
-                                try:
-                                    await event.send(MessageChain([Image(file=img_path)]))
-                                except Exception as e:
-                                    logger.error(f"[SMM2] Failed to send image: {e}")
-                            for fp in images:
-                                try: os.unlink(fp)
-                                except: pass
-                            yield event.plain_result("Level info and images sent")
-                            return
-                    # fallback to low
-                    body = self._fmt_level(pure_id, level)
-                    body += f"\n\nRender HD images: /render {pure_id[0:3]}-{pure_id[3:6]}-{pure_id[6:9]}"
-                    img_url = f"{THUMB_URL}/{pure_id}"
-                    await event.send(MessageChain([Plain(body), Image(file=img_url, url=img_url)]))
-                    yield event.plain_result("Level info and images sent")
-                    return
-                else:
-                    body = self._fmt_level(pure_id, level)
-                    body += f"\n\nRender HD images: /render {pure_id[0:3]}-{pure_id[3:6]}-{pure_id[6:9]}"
-                    img_url = f"{THUMB_URL}/{pure_id}"
-                    await event.send(MessageChain([Plain(body), Image(file=img_url, url=img_url)]))
-                    yield event.plain_result("Level info and images sent")
-                    return
-
-        yield event.plain_result(f"Level {raw_id} does not exist")
-
-    @llm_tool(name="smm2_query_player")
-    async def smm2_query_player(self, event: AstrMessageEvent, course_id: str):
-        """Query Super Mario Maker 2 player info. Use this tool when a user explicitly says "look up xxx this person/player/user" via text, querying players only. Returns an error if the player does not exist. Note: this tool is for text messages only. If the user sends an image, use the smm2_image_lookup tool instead.
-
-        Important: SMM2 IDs consist of 9 characters (format: XXX-XXX-XXX), using only: 0-9, A-Y, excluding I, O, Z.
-        If the recognized ID contains O, I, Z, correct them: O→0, I→1, Z→2.
-
-        User hint: {llm_hint}
-
-        Args:
-            course_id(string): Player ID, format XXX-XXX-XXX or 9 chars
-        """
-        if not (self.config and self.config.get("enable_llm_tools", False)):
-            yield event.plain_result("LLM tools are disabled")
-            return
-
-        raw_id = parse_id(course_id) or ""
-        if not raw_id:
-            yield event.plain_result("Could not recognize ID format, please provide an ID in XXX-XXX-XXX format")
-            return
-
-        async with aiohttp.ClientSession() as s:
-            user_data, lists = await fetch_player(s, fix_smm2_id(raw_id))
-            if user_data and isinstance(user_data, dict) and "_status" not in user_data:
-                body = self._fmt_player(fix_smm2_id(raw_id), user_data, lists)
-                yield event.chain_result([Plain(body)])
-                return
-
-        yield event.plain_result(f"Player {raw_id} does not exist")
-
-    @llm_tool(name="smm2_random_course")
-    async def smm2_random_course(self, event: AstrMessageEvent, difficulty: str = ""):
-        """Randomly draw a Super Mario Maker 2 level and send the level image and basic info. Use this tool when a user says "draw a level", "give me a random one", "give me a hard one", etc.
-
-        User hint: {llm_hint}
-
-        Args:
-            difficulty(string): Difficulty parameter, optional values: 0=Any 1=Easy 2=Normal 3=Hard 4=Expert. Defaults to 0 if not specified.
-        """
-        if not (self.config and self.config.get("enable_llm_tools", False)):
-            yield event.plain_result("LLM tools are disabled")
-            return
-        if not (self.config and self.config.get("enable_llm_random", True)):
-            yield event.plain_result("Random level draw tool is disabled")
-            return
-
-        try:
-            mode_int = int(difficulty) if difficulty else 0
-        except ValueError:
-            mode_int = 0
-        if mode_int not in (0, 1, 2, 3, 4):
-            mode_int = 0
-
-        diff_map = {0: "Any", 1: "Easy", 2: "Normal", 3: "Hard", 4: "Expert"}
-        api_diff = {0: "", 1: "e", 2: "n", 3: "ex", 4: "sex"}
-
-        async with aiohttp.ClientSession() as s:
-            qs = f"?difficulty={api_diff[mode_int]}" if api_diff[mode_int] else ""
-            data = await api_get(s, f"{SEARCH_ENDLESS}{qs}")
-            if not data or (isinstance(data, dict) and "_status" in data):
-                yield event.plain_result("Draw failed, please try again later")
-                return
-
-            pure_id, cname = self._extract_first_id(data)
-            if not pure_id:
-                yield event.plain_result("No level list retrieved")
-                return
-            pure_id = pure_id.upper().replace("-", "")
-
-            level, used_id = await try_query_level_with_corrections(s, pure_id)
-            if level:
-                pure_id = used_id
-                body = f"Drew a {diff_map[mode_int]} level\n" + self._fmt_level(pure_id, level)
-
-                quality = "high"
-                if self.config:
-                    quality = (self.config.get("image_quality") or "high").strip().lower()
-
-                if quality == "high" and os.path.exists(TOOST_EXE):
-                    images = await self._do_render(event, pure_id)
-                    if images:
-                        await event.send(MessageChain([Plain(body)]))
-                        for img_path in images:
-                            try:
-                                await event.send(MessageChain([Image(file=img_path)]))
-                            except Exception as e:
-                                logger.error(f"[SMM2] Failed to send image: {e}")
-                        for fp in images:
-                            try: os.unlink(fp)
-                            except: pass
-                        event.stop_event()
-                        return
-
-                img_url = f"{THUMB_URL}/{pure_id}"
-                await event.send(MessageChain([Plain(body), Image(file=img_url, url=img_url)]))
-                event.stop_event()
-                return
-            else:
-                img_url = f"{THUMB_URL}/{pure_id}"
-                yield event.chain_result([Plain(f"Drew a {diff_map[mode_int]} level {pure_id}"), Image(file=img_url, url=img_url)])

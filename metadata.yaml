@@ -4,7 +4,7 @@ author: linker9527
 author_url: https://github.com/linker9527
 description: Super Mario Maker 2 level/player query, random draw, bcd download, HD level rendering.
 short_desc: SMM2 level query, random draw, bcd download, level rendering
-version: 1.2.0
+version: 1.1.1
 repo: https://github.com/linker9527/astrbot_plugin_smm2
 category: Games
 tags:
@@ -23,8 +23,5 @@ help: |
   Notes:
   ID supports dashed (XXX-XXX-XXX) or 9-char format, case-insensitive
   /smm2 queries levels first, auto-falls back to player if not found
-  Supports LLM natural language: just say "look up xxx" to query
-  Supports image recognition: send a Switch screenshot to auto-recognize level ID and render
-  OCR correction: SMM2 IDs do not contain I/O/Z, auto-corrected (O→0, I→L/1/7)
-  /render requires toost renderer; place the toost directory in the plugin folder
+  /render requires toost renderer; it auto-downloads on first use
   toost download: https://github.com/TheGreatRambler/toost/releases
