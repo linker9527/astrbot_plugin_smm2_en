@@ -228,11 +228,11 @@ def _send_text(event, text):
 # ============ PLUGIN CLASS ============
 
 @register(
-    "astrbot_plugin_smm2",
+    "astrbot_plugin_smm2_en",
     "linker9527",
     "Super Mario Maker 2 level/player query, random draw, bcd download, level rendering",
     "1.1.1",
-    "https://github.com/linker9527/astrbot_plugin_smm2",
+    "https://github.com/linker9527/astrbot_plugin_smm2_en",
 )
 class Smm2Plugin(Star):
     def __init__(self, context: Context, config=None):
